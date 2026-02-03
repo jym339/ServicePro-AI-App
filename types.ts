@@ -37,6 +37,7 @@ export interface Lead {
   appointmentTime?: string;
   confirmationNumber?: string;
   inServiceArea?: boolean;
+  alternativeRecommendations?: string[];
 }
 
 export interface TranscriptionItem {

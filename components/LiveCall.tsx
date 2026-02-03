@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Type, FunctionDeclaration, Blob } from '@google/genai';
 import { CallState, Lead, UrgencyLevel, TranscriptionItem } from '../types';
-import { Mic, MicOff, PhoneOff, User, Bot, AlertCircle, CheckCircle, Info, MapPin, Hash, Globe, Mail, MessageSquare, ExternalLink } from 'lucide-react';
+import { Mic, MicOff, PhoneOff, User, Bot, AlertCircle, CheckCircle, Info, MapPin, Hash, Globe, Mail, MessageSquare, ExternalLink, Map as MapIcon, Navigation } from 'lucide-react';
 
 interface GroundingChunk {
   maps?: {
@@ -32,7 +32,6 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
-  // Fetch location on mount
   useEffect(() => {
     if ("geolocation" in navigator) {
       navigator.geolocation.getCurrentPosition(
@@ -47,7 +46,6 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
     }
   }, []);
 
-  // Auto-scroll transcript
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [currentTranscript]);
@@ -134,9 +132,9 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
         name: 'checkServiceArea',
         parameters: {
           type: Type.OBJECT,
-          description: 'Checks if a provided address is within the company operational service area using Google Maps data.',
+          description: 'Verifies the operational status of an address. Uses Google Maps to determine if the address is in-zone and identifies nearby alternative providers if it is not.',
           properties: {
-            address: { type: Type.STRING, description: 'The customer service address' },
+            address: { type: Type.STRING, description: 'The customer service address provided' },
           },
           required: ['address'],
         },
@@ -193,31 +191,22 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
           responseModalities: [Modality.AUDIO],
           outputAudioTranscription: {},
           inputAudioTranscription: {},
-          systemInstruction: `You are a virtual receptionist for "ServicePro HVAC & Plumbing".
+          systemInstruction: `You are the virtual dispatcher for "ServicePro HVAC & Plumbing".
           
-          LOCATION CONTEXT:
-          ${userLocation ? `The caller is located near latitude: ${userLocation.latitude}, longitude: ${userLocation.longitude}.` : "Caller location unknown."}
-          Our primary service areas are Springfield, Riverdale, and Anytown.
+          PRIMARY MISSION: Determine if the caller is in our service area (Springfield, Riverdale, and Anytown) and manage their request.
 
-          CORE WORKFLOW:
-          1. GREET and identify caller need.
-          2. AS SOON AS an address is provided, call 'checkServiceArea'.
-             - If OUT of area: Inform them politely. Mention Springfield, Riverdale, and Anytown as our primary zones. Recommend "Local Heroes Plumbing".
-             - If IN area: Proceed with lead capture.
-          
-          URGENCY HANDLING:
-          - Emergency? Gather details, check area, call 'dispatchTechnician'.
-          
-          SCHEDULING:
-          - Non-emergency? Gather contact info, offer schedule.
-          - Call 'scheduleAppointment' when agreed. Returns confirmation number.
-          - AFTER SCHEDULING: 
-            A. Provide the unique confirmation number clearly.
-            B. Repeat back the full details: Address, Service Type, Date, and Time.
-            C. ASK the caller: "Would you like me to send these confirmation details to you via SMS text message?"
-            D. IF THEY AGREE: Prompt for their mobile phone number if you don't have it, then call 'sendConfirmation' with method: 'sms'.
+          OUT OF AREA PROTOCOL:
+          If 'checkServiceArea' returns that the address is OUTSIDE our zone:
+          1. Be empathetic. "I'm so sorry, it looks like that address is just outside our current service zone."
+          2. Use the 'alternativeRecommendations' provided by the tool to offer helpful alternatives.
+          3. Mention: "However, there are a few highly-rated service providers near you like [Alt 1] and [Alt 2] that might be able to help today."
 
-          Maintain professional, high-end receptionist tone. Always be helpful and polite.`,
+          SERVICE FLOW:
+          1. Greeting: Welcome them to ServicePro.
+          2. Address Capture: Get the service address early.
+          3. Area Check: Call 'checkServiceArea' immediately after getting the address.
+          4. Categorize: Emergency vs Scheduled Repair.
+          5. Close: Schedule appointment or confirm dispatch. Always offer SMS confirmation.`,
           tools: [{ functionDeclarations: [checkServiceArea, scheduleAppointment, sendConfirmation, dispatchTechnician] }],
         },
         callbacks: {
@@ -262,13 +251,13 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
 
                 if (fc.name === 'checkServiceArea') {
                   const addr = fc.args.address as string;
-                  
-                  // PERFORM MAPS GROUNDING CALL
                   try {
                     const groundingAi = new GoogleGenAI({ apiKey: process.env.API_KEY });
                     const groundingResponse = await groundingAi.models.generateContent({
-                      model: "gemini-2.5-flash",
-                      contents: `Analyze this address: "${addr}". Is it within Springfield, Riverdale, or Anytown? Provide grounding details.`,
+                      model: "gemini-2.5-flash-preview",
+                      contents: `1. Is the address "${addr}" within Springfield, Riverdale, or Anytown?
+                                2. If NO, find the top 3 plumbing or HVAC service providers located very close to "${addr}". 
+                                Provide the output as a clear 'InArea' status and a list of 'Alternatives'.`,
                       config: {
                         tools: [{ googleMaps: {} }],
                         ...(userLocation && {
@@ -285,22 +274,33 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
                     });
 
                     const textRes = groundingResponse.text || "";
-                    const isInArea = /yes|within|inside|in area/i.test(textRes) || /springfield|riverdale|anytown|123 main/i.test(addr);
+                    const isInArea = /yes|within|inside|in area/i.test(textRes) || /springfield|riverdale|anytown|123 main/i.test(addr.toLowerCase());
                     const chunks = groundingResponse.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
                     
+                    // Extract names of alternatives if out of area
+                    const alts = textRes.split('\n')
+                      .filter(line => line.includes('-') || line.match(/^\d\./))
+                      .map(line => line.replace(/^[-\d.\s]+/, '').trim())
+                      .slice(0, 3);
+
                     setGroundingLinks(chunks as any);
-                    setExtractedInfo(prev => ({ ...prev, address: addr, inServiceArea: isInArea }));
+                    setExtractedInfo(prev => ({ 
+                      ...prev, 
+                      address: addr, 
+                      inServiceArea: isInArea,
+                      alternativeRecommendations: !isInArea ? alts : []
+                    }));
                     
                     toolResult = { 
                       inArea: isInArea, 
+                      alternativeRecommendations: !isInArea ? alts : [],
                       details: textRes,
                       groundingSources: chunks
                     };
                   } catch (groundingErr) {
                     console.error("Grounding failed", groundingErr);
-                    const isInArea = /springfield|riverdale|anytown|123 main/i.test(addr);
-                    setExtractedInfo(prev => ({ ...prev, address: addr, inServiceArea: isInArea }));
-                    toolResult = { inArea: isInArea, error: "Grounding service temporarily unavailable, used fallback check." };
+                    const isInArea = /springfield|riverdale|anytown/i.test(addr.toLowerCase());
+                    toolResult = { inArea: isInArea, error: "Maps grounding error." };
                   }
                 } 
                 else if (fc.name === 'scheduleAppointment') {
@@ -317,7 +317,6 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
                   setExtractedInfo(prev => ({ 
                     ...prev, 
                     [data.method === 'email' ? 'email' : 'phoneNumber']: data.destination,
-                    // Ensure the icon updates by marking sending status
                     status: prev.status === 'Scheduled' ? 'Scheduled' : prev.status 
                   }));
                 }
@@ -394,13 +393,13 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
 
           <div className="mt-8 text-center z-10">
             <h3 className="text-xl font-bold text-white mb-2">
-              {callState.isActive ? 'AI Receptionist Live' : 'System Standby'}
+              {callState.isActive ? 'AI Dispatcher Engaged' : 'Dispatcher Standby'}
             </h3>
             <p className="text-slate-400 max-w-md mx-auto flex items-center justify-center gap-2">
-              {userLocation && <span className="bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded text-[10px] font-bold">Geolocation Active</span>}
+              {userLocation && <span className="bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded text-[10px] font-bold">Maps & Geolocation Ready</span>}
               {callState.isActive 
-                ? 'Managing flow & handling SMS confirmations...' 
-                : 'Click Go Online to begin receiving simulated calls.'}
+                ? 'Verifying service areas & identifying local alternatives...' 
+                : 'Ready to manage calls, verify zones, and handle scheduling.'}
             </p>
           </div>
 
@@ -411,7 +410,7 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
                 disabled={isConnecting}
                 className="px-8 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold shadow-lg shadow-blue-500/30 transition-all flex items-center gap-2 disabled:opacity-50"
               >
-                {isConnecting ? 'Connecting...' : 'Go Online'}
+                {isConnecting ? 'Initializing...' : 'Go Online'}
                 {!isConnecting && <Mic className="w-5 h-5" />}
               </button>
             ) : (
@@ -419,7 +418,7 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
                 onClick={stopCall}
                 className="px-8 py-3 bg-red-600 hover:bg-red-500 text-white rounded-xl font-bold shadow-lg shadow-red-500/30 transition-all flex items-center gap-2"
               >
-                End Call
+                Terminate Session
                 <PhoneOff className="w-5 h-5" />
               </button>
             )}
@@ -437,11 +436,11 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
           <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
             <h4 className="font-bold text-slate-700 flex items-center gap-2">
               <Info className="w-4 h-4 text-blue-500" />
-              Live Transcript
+              Communication Stream
             </h4>
             <div className="flex gap-2">
-               {extractedInfo.inServiceArea === true && <span className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded text-[10px] font-bold border border-emerald-200 uppercase tracking-tighter">Verified In Area</span>}
-               {extractedInfo.inServiceArea === false && <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-[10px] font-bold border border-red-200 uppercase tracking-tighter">Out of Area</span>}
+               {extractedInfo.inServiceArea === true && <span className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded text-[10px] font-bold border border-emerald-200 uppercase tracking-tighter">In Area</span>}
+               {extractedInfo.inServiceArea === false && <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-[10px] font-bold border border-red-200 uppercase tracking-tighter">Out of Zone</span>}
             </div>
           </div>
           <div className="flex-1 overflow-y-auto p-6 space-y-4">
@@ -457,7 +456,7 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
             ))}
             {currentTranscript.length === 0 && (
               <div className="h-full flex items-center justify-center text-slate-400 italic text-sm">
-                Awaiting caller voice input...
+                Standing by for incoming customer voice stream...
               </div>
             )}
             <div ref={transcriptEndRef} />
@@ -469,8 +468,8 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
         <div className="bg-white rounded-3xl shadow-sm border border-slate-100 p-6 flex flex-col gap-6">
           <div className="flex items-center justify-between">
             <h4 className="font-bold text-slate-800 text-lg flex items-center gap-2">
-              <CheckCircle className="w-5 h-5 text-emerald-500" />
-              Service Details
+              <MapIcon className="w-5 h-5 text-blue-500" />
+              Dispatch Status
             </h4>
             {extractedInfo.confirmationNumber && (
               <div className="bg-blue-600 text-white px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-blue-500/20">
@@ -481,33 +480,45 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
           </div>
           
           <div className="space-y-4">
-            <div className="grid grid-cols-1 gap-4">
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                  <User className="w-3 h-3" /> Customer
-                </label>
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-slate-700 font-medium min-h-[44px]">
-                  {extractedInfo.fullName || <span className="text-slate-300 italic">...</span>}
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                   <Globe className="w-3 h-3" /> Maps Verification
-                </label>
-                <div className={`p-3 rounded-xl border flex items-center justify-between min-h-[44px] ${extractedInfo.inServiceArea === undefined ? 'bg-slate-50 border-slate-100' : extractedInfo.inServiceArea ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-red-50 border-red-100 text-red-700'}`}>
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                <Navigation className="w-3 h-3" /> Service Area Logic
+              </label>
+              <div className={`p-3 rounded-xl border flex flex-col gap-2 min-h-[44px] ${extractedInfo.inServiceArea === undefined ? 'bg-slate-50 border-slate-100' : extractedInfo.inServiceArea ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-red-50 border-red-100 text-red-700'}`}>
+                 <div className="flex items-center justify-between">
                    <span className="text-sm font-semibold">
-                     {extractedInfo.inServiceArea === undefined ? 'Detecting Location...' : extractedInfo.inServiceArea ? 'In Service Zone' : 'Outside Primary Zone'}
+                     {extractedInfo.inServiceArea === undefined ? 'Awaiting Address...' : extractedInfo.inServiceArea ? 'Address Verified' : 'Outside Service Area'}
                    </span>
                    {extractedInfo.inServiceArea !== undefined && (
                      extractedInfo.inServiceArea ? <CheckCircle className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />
                    )}
-                </div>
+                 </div>
+                 {extractedInfo.inServiceArea === false && extractedInfo.alternativeRecommendations && (
+                   <div className="mt-2 pt-2 border-t border-red-200 space-y-1.5">
+                     <p className="text-[10px] font-black uppercase tracking-tighter">Nearby Alternatives Found:</p>
+                     {extractedInfo.alternativeRecommendations.map((rec, idx) => (
+                       <div key={idx} className="flex items-center gap-2 text-xs font-medium">
+                         <div className="w-1 h-1 bg-red-400 rounded-full" />
+                         {rec}
+                       </div>
+                     ))}
+                   </div>
+                 )}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                <MapPin className="w-3 h-3" /> Customer Address
+              </label>
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-slate-700 text-sm min-h-[44px]">
+                {extractedInfo.address || <span className="text-slate-300 italic">...</span>}
               </div>
             </div>
 
             {groundingLinks.length > 0 && (
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Grounding Sources</label>
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Maps Grounding Context</label>
                 <div className="flex flex-col gap-2">
                   {groundingLinks.map((chunk, i) => chunk.maps && (
                     <a 
@@ -525,20 +536,11 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
               </div>
             )}
 
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                <MapPin className="w-3 h-3" /> Reported Address
-              </label>
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-slate-700 text-sm min-h-[44px]">
-                {extractedInfo.address || <span className="text-slate-300 italic">Awaiting address...</span>}
-              </div>
-            </div>
-
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Appointment</label>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-slate-700 text-sm min-h-[44px]">
-                  {extractedInfo.appointmentDate ? `${extractedInfo.appointmentDate} at ${extractedInfo.appointmentTime}` : <span className="text-slate-300 italic">Not set</span>}
+                  {extractedInfo.appointmentDate ? `${extractedInfo.appointmentDate} at ${extractedInfo.appointmentTime}` : <span className="text-slate-300 italic">Pending</span>}
                 </div>
               </div>
               <div className="space-y-1.5">
@@ -556,17 +558,20 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
           </div>
 
           <div className="mt-4 pt-6 border-t border-slate-100">
-             <div className="bg-slate-50 p-4 rounded-2xl space-y-2 border border-slate-100">
+             <div className="bg-slate-50 p-4 rounded-2xl space-y-3 border border-slate-100">
                <h5 className="text-xs font-bold text-slate-500 uppercase flex items-center gap-2">
-                 <MessageSquare className="w-4 h-4 text-blue-500" />
-                 Confirmation Status
+                 <CheckCircle className="w-4 h-4 text-emerald-500" />
+                 Workflow Checklist
                </h5>
                <ul className="space-y-2">
-                 <li className={`text-[11px] flex items-center gap-2 ${extractedInfo.confirmationNumber ? 'text-emerald-600' : 'text-slate-400'}`}>
-                   <CheckCircle className={`w-3.5 h-3.5 ${extractedInfo.confirmationNumber ? 'fill-emerald-500 text-white' : 'text-slate-200'}`} /> Confirmation Generated
+                 <li className={`text-[11px] flex items-center gap-2 ${extractedInfo.address ? 'text-emerald-600 font-bold' : 'text-slate-400'}`}>
+                   <div className={`w-1.5 h-1.5 rounded-full ${extractedInfo.address ? 'bg-emerald-500' : 'bg-slate-300'}`} /> Address Captured
                  </li>
-                 <li className={`text-[11px] flex items-center gap-2 ${extractedInfo.phoneNumber && extractedInfo.status === 'Scheduled' ? 'text-emerald-600' : 'text-slate-400'}`}>
-                   <CheckCircle className={`w-3.5 h-3.5 ${extractedInfo.phoneNumber && extractedInfo.status === 'Scheduled' ? 'fill-emerald-500 text-white' : 'text-slate-200'}`} /> SMS Consent Obtained
+                 <li className={`text-[11px] flex items-center gap-2 ${extractedInfo.inServiceArea !== undefined ? 'text-emerald-600 font-bold' : 'text-slate-400'}`}>
+                   <div className={`w-1.5 h-1.5 rounded-full ${extractedInfo.inServiceArea !== undefined ? 'bg-emerald-500' : 'bg-slate-300'}`} /> Zone Verification Done
+                 </li>
+                 <li className={`text-[11px] flex items-center gap-2 ${extractedInfo.confirmationNumber ? 'text-emerald-600 font-bold' : 'text-slate-400'}`}>
+                   <div className={`w-1.5 h-1.5 rounded-full ${extractedInfo.confirmationNumber ? 'bg-emerald-500' : 'bg-slate-300'}`} /> Appointment Fixed
                  </li>
                </ul>
              </div>
