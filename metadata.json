@@ -1,0 +1,8 @@
+{
+  "name": "ServicePro AI Receptionist",
+  "description": "A professional AI-powered virtual receptionist and dispatcher for home services, featuring real-time voice interaction and automated lead management.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
