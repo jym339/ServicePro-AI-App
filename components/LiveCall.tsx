@@ -27,6 +27,9 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
+  const inputStreamRef = useRef<MediaStream | null>(null);
+  const inputSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const nextStartTimeRef = useRef(0);
   const sessionRef = useRef<any>(null);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
@@ -99,6 +102,18 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
       sessionRef.current.close();
       sessionRef.current = null;
     }
+    if (scriptProcessorRef.current) {
+      scriptProcessorRef.current.disconnect();
+      scriptProcessorRef.current = null;
+    }
+    if (inputSourceRef.current) {
+      inputSourceRef.current.disconnect();
+      inputSourceRef.current = null;
+    }
+    if (inputStreamRef.current) {
+      inputStreamRef.current.getTracks().forEach(track => track.stop());
+      inputStreamRef.current = null;
+    }
     if (audioContextRef.current) {
       audioContextRef.current.close();
       audioContextRef.current = null;
@@ -111,6 +126,10 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
     setIsConnecting(false);
   }, [onStateChange]);
 
+  useEffect(() => () => {
+    stopCall();
+  }, [stopCall]);
+
   const startCall = async () => {
     try {
       setIsConnecting(true);
@@ -119,7 +138,14 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
       setExtractedInfo({});
       setGroundingLinks([]);
 
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const apiKey = import.meta.env.VITE_API_KEY;
+      if (!apiKey) {
+        setError('Missing API key. Please set VITE_API_KEY.');
+        setIsConnecting(false);
+        return;
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
       
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
@@ -127,6 +153,7 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
       outputAudioContextRef.current = outputCtx;
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      inputStreamRef.current = stream;
 
       const checkServiceArea: FunctionDeclaration = {
         name: 'checkServiceArea',
@@ -213,6 +240,8 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
 
             const source = inputCtx.createMediaStreamSource(stream);
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
+            inputSourceRef.current = source;
+            scriptProcessorRef.current = scriptProcessor;
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               const pcmBlob = createBlob(inputData);
@@ -249,7 +278,7 @@ const LiveCall: React.FC<LiveCallProps> = ({ callState, onNewLead, onStateChange
                 if (fc.name === 'checkServiceArea') {
                   const addr = fc.args.address as string;
                   try {
-                    const groundingAi = new GoogleGenAI({ apiKey: process.env.API_KEY });
+                    const groundingAi = new GoogleGenAI({ apiKey });
                     const groundingResponse = await groundingAi.models.generateContent({
                       model: "gemini-2.5-flash-preview",
                       contents: `Analyze: "${addr}".
